@@ -1,0 +1,18 @@
+; Minimal Z80 sound driver: no sound, just answers the BIOS.
+        org     $0000
+        di
+        jp      start
+        org     $0038
+        ei                      ; YM2610 IRQ (never enabled)
+        reti
+        org     $0066
+nmi:    push    af              ; a command from the 68000:
+        in      a,($00)         ; read it (this acknowledges it)
+        out     ($0c),a         ; and echo it as the reply
+        pop     af
+        retn
+        org     $0100
+start:  ld      sp,$ffff
+        im      1
+        out     ($08),a         ; enable NMI (68000 commands)
+loop:   jr      loop
