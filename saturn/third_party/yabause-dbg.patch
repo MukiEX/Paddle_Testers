@@ -1,0 +1,44 @@
+diff --git a/yabause/src/libretro/Makefile.common b/yabause/src/libretro/Makefile.common
+index 4f34901..cb8fcaa 100644
+--- a/yabause/src/libretro/Makefile.common
++++ b/yabause/src/libretro/Makefile.common
+@@ -21,7 +21,7 @@ INCLUDE_DIRS := $(CORE_DIR) \
+ 
+ OBJECTS_S :=
+ 
+-SOURCES_C := $(SOURCE_DIR)/osdcore.c \
++SOURCES_C := $(SOURCE_DIR)/osdcore.c $(SOURCE_DIR)/libretro/dbg.c \
+ 	$(SOURCE_DIR)/bios.c \
+ 	$(SOURCE_DIR)/cd-libretro.c \
+ 	$(SOURCE_DIR)/cd_drive.c \
+diff --git a/yabause/src/libretro/link.T b/yabause/src/libretro/link.T
+index b0c262d..3728278 100644
+--- a/yabause/src/libretro/link.T
++++ b/yabause/src/libretro/link.T
+@@ -1,5 +1,5 @@
+ {
+-   global: retro_*;
++   global: retro_*; dbg_*;
+    local: *;
+ };
+ 
+diff --git a/yabause/src/sh2int.c b/yabause/src/sh2int.c
+index c6f9696..510d535 100644
+--- a/yabause/src/sh2int.c
++++ b/yabause/src/sh2int.c
+@@ -2989,6 +2989,7 @@ FASTCALL void SH2DebugInterpreterExec(SH2_struct *context, u32 cycles)
+ 
+ //////////////////////////////////////////////////////////////////////////////
+ 
++extern int dbg_hook_active; void dbg_exec_hook(SH2_struct *c);
+ FASTCALL void SH2InterpreterExec(SH2_struct *context, u32 cycles)
+ {
+    SH2HandleInterrupts(context);
+@@ -3005,6 +3006,7 @@ FASTCALL void SH2InterpreterExec(SH2_struct *context, u32 cycles)
+    {
+       int cycles_before = context->cycles;
+       int cycles_diff = 0;
++      if (dbg_hook_active) dbg_exec_hook(context);
+       // Fetch Instruction
+ 
+       if (yabsys.sh2_cache_enabled)

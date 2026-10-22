@@ -2,3 +2,6 @@ ps1/build/
 ps1/shots/
 ps1/sys/
 __pycache__/
+saturn/build/
+saturn/shots/
+saturn/third_party/*.so
