@@ -5,8 +5,12 @@ Outputs (in build/):
   bg.bin     512x224 8bpp background bitmap (VDP2 NBG0 layout, row stride 512)
   pal.bin    256 x RGB555 colour RAM words
   font.bin   96 glyphs x 16 bytes (rows 0..12 used, bit7 = leftmost of 6 px)
-  pats.bin   bit-stream column patterns: 8 traces x 3 states x 12 bytes
+  pats.bin   bit-stream column patterns: 12 traces x 4 states x 8 bytes
   btncol.bin 13 buttons x (fillOff, fillOn, labelOff, labelOn) RGB555 words
+  duals.bin  per port: count, then (cram index, normal colour, knob colour, rim segment) words
+             for the pixels that change when the pad is drawn as a spinner (knob in place
+             of the d-pad); segment 0xFFFF = not on the rim
+  knobcol.bin face colour, marker colour
   preview.png
 """
 import gzip, io, os, struct
@@ -33,10 +37,16 @@ BG, BODY, EDGE, TEXT, DIM, BASE, CURSOR, GRID = range(8)
 pal[BG] = rgb(14, 16, 30); pal[BODY] = rgb(58, 60, 72); pal[EDGE] = rgb(22, 22, 28)
 pal[TEXT] = rgb(235, 235, 240); pal[DIM] = rgb(130, 135, 155); pal[BASE] = rgb(70, 74, 100)
 pal[CURSOR] = rgb(255, 255, 255); pal[GRID] = rgb(40, 44, 66)
-TRACE_COL = [rgb(60, 200, 255), rgb(255, 210, 40), rgb(80, 230, 110), rgb(240, 90, 240)]
-for i, c in enumerate(TRACE_COL): pal[8 + i] = c
-RED = 12; pal[RED] = rgb(255, 40, 40)
 DPADC = 13; pal[DPADC] = rgb(36, 36, 44)
+# bit-stream rows per port: LEFT RIGHT UP DOWN Y Z; pairs LEFT+RIGHT, UP+DOWN, Y+Z
+TNAMES = ['LEFT', 'RIGHT', 'UP', 'DOWN', 'Y', 'Z']
+TRACE_COL = [rgb(60, 200, 255), rgb(255, 210, 40), rgb(150, 150, 255), rgb(255, 150, 200), rgb(80, 230, 110), rgb(240, 90, 240)]
+TC0 = 16
+for i, c in enumerate(TRACE_COL): pal[TC0 + i] = c
+RED = 22; pal[RED] = rgb(255, 40, 40)
+DROP = 23; pal[DROP] = rgb(255, 140, 0)
+# knob (spinner in place of the d-pad)
+K_FACE, K_LIP, K_K1, K_K2, K_MARK = rgb(30, 30, 36), rgb(54, 54, 62), rgb(78, 78, 90), rgb(48, 48, 58), rgb(250, 250, 250)
 
 # button order = SMPC/SGL bit 15..3
 BTN = ['RIGHT', 'LEFT', 'DOWN', 'UP', 'START', 'A', 'C', 'B', 'R', 'X', 'Y', 'Z', 'L']
@@ -114,19 +124,55 @@ for p in range(2):
         d.ellipse((x0 + bx - r, by - r, x0 + bx + r, by + r), fill=fill_idx(p, bi), outline=EDGE)
         label_center(x0 + bx, by, name, lab_idx(p, bi))
     text(x0 + 4, 89, 'RAW', DIM)
-    text(x0 + 4, 101, 'BOTH', DIM)
 d.line((159, 0, 159, 111), fill=GRID)
 d.line((0, 113, 319, 113), fill=GRID)
-text(4, 114, 'BIT STREAM', TEXT, F10)
-text(84, 114, '1px = 1 frame, red = both held', DIM, F10)
-TX0, TW, TY0 = 52, 264, 126
-names = ['LEFT', 'RIGHT', 'Y', 'Z']
-for i in range(8):
-    p, t = divmod(i, 4)
-    y = TY0 + i * 12
-    text(2, y + 1, '%d %s' % (p + 1, names[t]), 8 + t, F10)
-    d.line((TX0, y + 9, TX0 + TW - 1, y + 9), fill=BASE)
-    if t == 3 and p == 0: d.line((0, y + 11, 319, y + 11), fill=GRID)
+text(4, 114, '1px/frame  red: pair held  orange: drop', DIM, F10)
+TX0, TW, TY0, ROWH = 52, 264, 126, 8
+NT = len(TNAMES)
+for i in range(2 * NT):
+    p, t = divmod(i, NT)
+    y = TY0 + i * ROWH
+    text(2, y - 1, '%d %s' % (p + 1, TNAMES[t]), TC0 + t, F10)
+    d.line((TX0, y + 6, TX0 + TW - 1, y + 6), fill=BASE)
+    if t == NT - 1 and p == 0: d.line((0, y + 7, 319, y + 7), fill=GRID)
+
+# ---------------------------------------------------------------- spinner knob over the d-pad
+# Each pixel of the knob disc gets an index that shows its normal colour, or the knob's
+# colour once the port has latched a JP3 spinner. D-pad button pixels under the knob face
+# keep their own (per-port) indices; the program paints those with the face colour.
+import math
+dpad_dyn = lambda p: {fill_idx(p, BTN.index(b)) for b in ('RIGHT', 'LEFT', 'DOWN', 'UP')} | {lab_idx(p, BTN.index(b)) for b in ('RIGHT', 'LEFT', 'DOWN', 'UP')}
+NSEG = 16
+nxt = 96; duals = []; knob_preview = img.copy()
+for p in range(2):
+    cx, cy = p * 160 + 39, 57
+    pairs = {}; ent = []
+    for y in range(cy - 27, cy + 28):
+        for x in range(cx - 27, cx + 28):
+            r = math.hypot(x - cx, y - cy)
+            if r > 26.5: continue
+            if r <= 20.5: role, kc, seg = 'face', K_FACE, 0xFFFF
+            elif r <= 22.0: role, kc, seg = 'lip', K_LIP, 0xFFFF
+            elif r <= 25.5:
+                ang = math.atan2(x - cx, -(y - cy)) % (2 * math.pi)     # clockwise from 12 o'clock
+                seg = int(ang / (2 * math.pi) * NSEG) % NSEG
+                role, kc = 'rim%d' % seg, (K_K1 if seg % 2 == 0 else K_K2)
+            else: role, kc, seg = 'edge', pal[EDGE], 0xFFFF
+            n = img.getpixel((x, y))
+            if n in dpad_dyn(p):
+                assert role == 'face', ('d-pad pixel outside the knob face', x, y)
+                knob_preview.putpixel((x, y), 200)
+                continue
+            assert n < 32, ('dynamic pixel under the knob', n, x, y)
+            key = (n, role)
+            if key not in pairs:
+                pairs[key] = nxt; ent.append((nxt, pal[n], kc, seg)); pal[nxt] = pal[n]; nxt += 1
+            img.putpixel((x, y), pairs[key])
+            knob_preview.putpixel((x, y), 201 + (seg if seg != 0xFFFF else (16 if role == 'face' else 17 if role == 'lip' else 18)))
+    duals.append(ent)
+assert nxt <= 256, nxt
+open(os.path.join(OUT, 'duals.bin'), 'wb').write(b''.join(struct.pack('>H', len(e)) + b''.join(struct.pack('>4H', *x) for x in e) for e in duals))
+open(os.path.join(OUT, 'knobcol.bin'), 'wb').write(struct.pack('>2H', K_FACE, K_MARK))
 img.putpalette(sum([[((c & 31) << 3), (((c >> 5) & 31) << 3), (((c >> 10) & 31) << 3)] for c in pal], []))
 img.save(os.path.join(OUT, 'preview.png'))
 open(os.path.join(OUT, 'bg.bin'), 'wb').write(img.tobytes())
@@ -148,17 +194,18 @@ open(os.path.join(OUT, 'font.bin'), 'wb').write(font)
 
 # ---------------------------------------------------------------- trace patterns
 pats = bytearray()
-for i in range(8):
-    p, t = divmod(i, 4)
-    for state in range(3):
-        col = [BG] * 12
-        if state == 0: col[9] = BASE
+for i in range(2 * NT):
+    p, t = divmod(i, NT)
+    for state in range(4):            # 0 off, 1 held, 2 both of its pair held, 3 pad dropped out
+        col = [BG] * ROWH
+        if state == 0: col[6] = BASE
+        elif state == 3: col = [DROP] * ROWH
         else:
-            for y in range(2, 10): col[y] = 8 + t if state == 1 else RED
-        if t == 3 and p == 0: col[11] = GRID
+            for y in range(1, 7): col[y] = TC0 + t if state == 1 else RED
+        if t == NT - 1 and p == 0 and state != 3: col[7] = GRID
         pats += bytes(col)
 open(os.path.join(OUT, 'pats.bin'), 'wb').write(pats)
 
-consts = dict(TX0=TX0, TW=TW, TY0=TY0, CURSOR=CURSOR, TEXT=TEXT, BG=BG)
+consts = dict(TX0=TX0, TW=TW, TY0=TY0, CURSOR=CURSOR, TEXT=TEXT, BG=BG, ROWH=ROWH, NROWS=2 * NT * ROWH)
 open(os.path.join(OUT, 'consts.inc'), 'w').write(''.join('.equ %s, %d\n' % kv for kv in consts.items()))
 print('ok', len(font), len(pats))
