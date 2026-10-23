@@ -9,9 +9,13 @@
  *   ID 0x23            Namco Volume, until NeGcon-only input (I, II or L past
  *                      0x60, or any button other than START/CIRCLE) shows on
  *                      3 reads in a row; then NeGcon until unplugged
- *   anything else      Controller; becomes a JP3 spinner (LEFT = phase A,
- *                      RIGHT = phase B) the first time LEFT and RIGHT read
- *                      pressed together
+ *   anything else      Controller; becomes a JP3 spinner, wired either
+ *                      LEFT = phase A / RIGHT = phase B (latches the first
+ *                      time LEFT and RIGHT read pressed together), or across
+ *                      the d-pad pairs, A = LEFT or RIGHT / B = UP or DOWN,
+ *                      for an encoder inside a real pad (latches when the pad
+ *                      goes straight from only LEFT/RIGHT to only UP/DOWN, or
+ *                      back, between two reads twice within a second)
  *   failed read        repeat the last good read; 30 in a row = unplugged
  *   I, II, L >= 0xF0   on an 0x23 read = garbled, counts as a failed read
  */
@@ -243,6 +247,7 @@ static char *put_h(char *o, unsigned v)
 
 enum { T_NONE, T_PAD, T_MOUSE, T_NEGCON, T_VOLUME, T_JP3 };
 static const char *const tname[] = { "", "CONTROLLER", "PS MOUSE", "NEGCON", "NAMCO VOLUME", "JP3 SPINNER" };
+static const char *const jp3name[] = { "", "JP3 SPINNER", "JP3 PAIRS" };
 
 typedef struct {
     u8 raw[34];      /* raw[0] = ID, then the report bytes */
@@ -257,8 +262,11 @@ typedef struct {
     int mvx, mvy;    /* mouse motion dot (smoothed) */
     int peak, peakt;
     int reads, fails;
+    u8 swn;          /* d-pad pairs: a swap was seen */
+    u32 swt;         /* frame of that swap */
 } Port;
 static Port port[2];
+volatile u32 frame_count;
 
 static void joy_init(void)
 {
@@ -313,7 +321,7 @@ out:
 static void port_reset(Port *p)
 {
     p->type = T_NONE; p->len = 0; p->raw[0] = 0;
-    p->neg = p->negn = p->negs = p->jp3 = 0; p->qdir = 0;
+    p->neg = p->negn = p->negs = p->jp3 = p->swn = 0; p->qdir = 0;
     p->btn = 0; p->dx = p->dy = p->step = 0;
 }
 
@@ -353,11 +361,23 @@ static void port_update(int i)
         } else { p->negn = 0; p->negs = 0; }
         p->type = p->neg ? T_NEGCON : T_VOLUME;
     } else {
-        int a = (w & PAD_LEFT) ? 1 : 0, bb = (w & PAD_RIGHT) ? 1 : 0;
+        int a, bb;
+        if (p->jp3 == 2) { a = (w & (PAD_LEFT | PAD_RIGHT)) != 0; bb = (w & (PAD_UP | PAD_DOWN)) != 0; }
+        else { a = (w & PAD_LEFT) ? 1 : 0; bb = (w & PAD_RIGHT) ? 1 : 0; }
         int pos = a ^ (3 * bb);         /* 00->0 10->1 11->2 01->3 */
         if (!p->jp3 && (w & (PAD_LEFT | PAD_RIGHT)) == (PAD_LEFT | PAD_RIGHT)) {
             p->jp3 = 1; p->qprev = (u8)pos; p->qdir = 0;
-        } else if (p->jp3) {
+        } else if (!p->jp3) {
+            /* d-pad pairs: straight from only LEFT/RIGHT to only UP/DOWN (or
+               back) between two reads, twice within a second */
+            int code = ((w & (PAD_LEFT | PAD_RIGHT)) != 0) | (((w & (PAD_UP | PAD_DOWN)) != 0) << 1);
+            int prev = p->qprev; p->qprev = (u8)code;
+            if ((code ^ prev) == 3 && (code == 1 || code == 2)) {
+                if (p->swn && frame_count - p->swt < 60) {
+                    p->jp3 = 2; p->qprev = (u8)(code * 2 - 1); p->qdir = 0; p->swn = 0;
+                } else { p->swn = 1; p->swt = frame_count; }
+            }
+        } else {
             int d = (pos - p->qprev) & 3;
             p->qprev = (u8)pos;
             if (d == 1) { p->qdir = 1; p->step = 1; }
@@ -394,7 +414,11 @@ static void draw_pad(Port *p, int ox, int oy)
     rect(cx - 13, cy - 4, 9, 9, lit(w, PAD_LEFT, dl));
     rect(cx + 5, cy - 4, 9, 9, lit(w, PAD_RIGHT, dr));
     rect(cx - 4, cy - 4, 9, 9, C_OFF);
-    if (p->type == T_JP3) { text(cx - 21, cy - 4, "A", C_TEXT, 0); text(cx + 16, cy - 4, "B", C_TEXT, 0); }
+    if (p->type == T_JP3 && p->jp3 == 2) {
+        rect(cx - 4, cy - 13, 9, 9, lit(w, PAD_UP, C_CIR)); rect(cx - 4, cy + 5, 9, 9, lit(w, PAD_DOWN, C_CIR));
+        rect(cx + 5, cy - 4, 9, 9, lit(w, PAD_RIGHT, C_ACC));
+        text(cx - 21, cy - 4, "A", C_TEXT, 0); text(cx - 2, cy + 16, "B", C_TEXT, 0);
+    } else if (p->type == T_JP3) { text(cx - 21, cy - 4, "A", C_TEXT, 0); text(cx + 16, cy - 4, "B", C_TEXT, 0); }
     /* select / start */
     rect(ox + 62, oy + 54, 11, 5, lit(w, PAD_SELECT, C_LIT));
     rect(ox + 80, oy + 54, 11, 5, lit(w, PAD_START, C_LIT));
@@ -510,7 +534,8 @@ static void draw_panel(int i)
     rect(ox, oy, 154, 146, C_PANEL);
     char s[48], *o;
     text(ox + 6, oy + 4, i ? "PLAYER 2" : "PLAYER 1", C_TEXT, 1);
-    if (p->type != T_NONE) text(ox + 150 - slen(tname[p->type]) * 6, oy + 8, tname[p->type], RGB(70, 120, 160), 0);
+    const char *nm = p->type == T_JP3 ? jp3name[p->jp3] : tname[p->type];
+    if (p->type != T_NONE) text(ox + 150 - slen(nm) * 6, oy + 8, nm, RGB(70, 120, 160), 0);
     int dy = oy + 6;
     switch (p->type) {
     case T_NONE: draw_none(ox, dy); break;
@@ -563,7 +588,7 @@ static void draw_bar(int i)
         } else {
             if (p->btn & PAD_LEFT) fill = -128;
             if (p->btn & PAD_RIGHT) fill = 127;
-            put_s(o, "D-PAD  (L+R TOGETHER = JP3 SPINNER)");
+            put_s(o, "D-PAD  (SPIN A JP3 TO LATCH)");
         }
         break;
     default:
@@ -587,7 +612,6 @@ static void tick_motion(Port *p)
 }
 
 /* exported for the test harness */
-volatile u32 frame_count;
 Port *volatile port_ptr;
 
 int main(void)
