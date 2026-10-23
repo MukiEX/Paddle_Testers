@@ -67,6 +67,14 @@ Q_SPD0          equ 22              ; .w count at the last speed sample
 Q_SPD           equ 24              ; .w counts per second
 D_SPD0          equ 26
 D_SPD           equ 28
+; the same encoder fields for the d-pad pairs wiring sit PAIRS bytes higher
+PAIRS           equ 32
+P_PH            equ 38              ; .b last pairs phase (bit0 LEFT|RIGHT, bit1 UP|DOWN)
+P_DET           equ 39              ; .b pairs wiring recognised
+P_RUN           equ 40              ; .b signed run of same-way pairs steps
+P_IDLE          equ 42              ; .w samples since the last pairs step
+PAIR_RUN        equ 12              ; steps the same way, each within
+PAIR_IDLE       equ 120             ; this many samples (~30 ms): a quick spin
 
 ; =====================================================================
         org     $000000
@@ -136,14 +144,14 @@ qtab:
 
 irq2_handler:
         move.w  #2,REG_IRQACK
-        movem.l d0-d3/a0,-(sp)
+        movem.l d0-d3/a0-a1,-(sp)
         lea     PL1,a0
         move.b  REG_P1CNT,d0
         bsr.s   sample
         lea     PL2,a0
         move.b  REG_P2CNT,d0
         bsr.s   sample
-        movem.l (sp)+,d0-d3/a0
+        movem.l (sp)+,d0-d3/a0-a1
         rte
 
 ; d0.b = port (active low), a0 = player
@@ -187,7 +195,59 @@ sample:
         bra.s   .dial
 .bad:   addq.w  #1,Q_BAD(a0)
         ; --- 7-bit dial in bits 0-6 ---
-.dial:  move.b  d0,d1
+        ; --- encoder across the d-pad pairs: A = LEFT|RIGHT, B = UP|DOWN
+        ; (an encoder wired inside a real pad). Latches on PAIR_RUN quick
+        ; steps the same way, like the Paddle Edition patches.
+.dial:  move.b  d0,d2
+        andi.b  #$0c,d2
+        sne     d2
+        andi.b  #1,d2
+        move.b  d0,d1
+        andi.b  #$03,d1
+        sne     d1
+        andi.b  #2,d1
+        or.b    d2,d1
+        andi.w  #3,d1               ; pairs phase
+        moveq   #0,d2
+        move.b  P_PH(a0),d2
+        cmp.b   d1,d2
+        bne.s   .pchg
+        addq.w  #1,P_IDLE(a0)
+        cmpi.w  #PAIR_IDLE,P_IDLE(a0)
+        bcs.s   .dial7
+        move.w  #PAIR_IDLE,P_IDLE(a0)
+        clr.b   P_RUN(a0)
+        bra.s   .dial7
+.pchg:  move.b  d1,P_PH(a0)
+        clr.w   P_IDLE(a0)
+        add.b   d2,d2
+        add.b   d2,d2
+        or.b    d1,d2
+        lea     qtab(pc),a1
+        move.b  (a1,d2.w),d2
+        bne.s   .pstep
+        addq.w  #1,PAIRS+Q_ERR(a0)  ; both lines changed
+        clr.b   P_RUN(a0)
+        bra.s   .dial7
+.pstep: ext.w   d2
+        add.w   d2,PAIRS+Q_CNT(a0)
+        move.w  VBL,PAIRS+Q_ACT(a0)
+        tst.b   P_DET(a0)
+        bne.s   .dial7
+        move.b  P_RUN(a0),d1
+        eor.b   d2,d1
+        bmi.s   .pnew               ; turned the other way
+        add.b   d2,P_RUN(a0)
+        move.b  P_RUN(a0),d1
+        bpl.s   .pabs
+        neg.b   d1
+.pabs:  cmpi.b  #PAIR_RUN,d1
+        bcs.s   .dial7
+        st      P_DET(a0)
+        bra.s   .dial7
+.pnew:  move.b  d2,P_RUN(a0)
+        ; --- 7-bit dial in bits 0-6 ---
+.dial7: move.b  d0,d1
         andi.b  #$7f,d1
         move.b  D_POS(a0),d2
         cmp.b   d1,d2
@@ -380,7 +440,7 @@ s_spin:         dc.b    "SPINNER  (TURN IT A FEW TIMES)",0
 ; {row, palette, text}
 labels:
         dc.b    14,5,"INPUT",0
-        dc.b    17,3,"JP3 L/R ENCODER",0
+        dc.b    17,3,"JP3 ENCODER",0
         dc.b    19,5,"COUNT",0
         dc.b    20,5,"SPEED",0
         dc.b    21,5,"SKIP",0
@@ -458,6 +518,12 @@ update_spin:
         move.w  d1,Q_SPD0(a5)
         lsl.w   #2,d0
         move.w  d0,Q_SPD(a5)
+        move.w  PAIRS+Q_CNT(a5),d0
+        move.w  d0,d1
+        sub.w   PAIRS+Q_SPD0(a5),d0
+        move.w  d1,PAIRS+Q_SPD0(a5)
+        lsl.w   #2,d0
+        move.w  d0,PAIRS+Q_SPD(a5)
         move.w  D_CNT(a5),d0
         move.w  d0,d1
         sub.w   D_SPD0(a5),d0
@@ -482,29 +548,47 @@ update_spin:
 .b0:    move.w  d0,REG_VRAMRW
         addq.l  #1,a0
         dbra    d3,.b
-        ; encoder
+        ; encoder: show the L/R wiring, or the pairs once only they are seen
+        movea.l a5,a4
+        lea     s_wlr(pc),a0
+        tst.b   Q_DET(a5)
+        bne.s   .w1
+        tst.b   P_DET(a5)
+        beq.s   .w0
+        lea     PAIRS(a5),a4
+        lea     s_wpairs(pc),a0
+        bra.s   .w1
+.w0:    lea     s_wnone(pc),a0
+.w1:    move.w  d7,d0
+        addi.w  #12,d0
+        moveq   #17,d1
+        move.w  #P_HEAD,d2
+        bsr     print
         lea     s_det(pc),a0
         move.w  #P_GOOD,d2
-        tst.b   Q_DET(a5)
+        moveq   #0,d0
+        move.b  Q_DET(a5),d0
+        or.b    P_DET(a5),d0
         bne.s   .q1
         lea     s_none(pc),a0
         move.w  #P_DIM,d2
 .q1:    move.w  d7,d0
         moveq   #18,d1
         bsr     print
-        move.w  Q_ACT(a5),d0
-        tst.b   Q_DET(a5)           ; "MOVING" only once it's recognised
+        move.w  Q_ACT(a4),d0
+        move.b  Q_DET(a5),d1        ; "MOVING" only once it's recognised
+        or.b    P_DET(a5),d1
         bne.s   .qa
         moveq   #0,d0
 .qa:    moveq   #18,d1
         bsr     act_flag
-        move.w  Q_CNT(a5),d0
+        move.w  Q_CNT(a4),d0
         moveq   #19,d1
         bsr     num_at
-        move.w  Q_SPD(a5),d0
+        move.w  Q_SPD(a4),d0
         moveq   #20,d1
         bsr     num_at
-        move.w  Q_ERR(a5),d0
+        move.w  Q_ERR(a4),d0
         moveq   #21,d1
         bsr     unum_at
         ; dial
@@ -533,6 +617,9 @@ update_spin:
 
 s_bits:         dc.b    "UDLRABCD"
 s_det:          dc.b    "DETECTED",0
+s_wlr:          dc.b    "L/R  ",0
+s_wpairs:       dc.b    "PAIRS",0
+s_wnone:        dc.b    "     ",0
 s_none:         dc.b    "NOT SEEN",0
 s_on:           dc.b    "MOVING",0
 s_off:          dc.b    "      ",0

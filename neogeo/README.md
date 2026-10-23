@@ -1,7 +1,7 @@
 # Neo Geo Controller Test
 
 An unencrypted Neo Geo cartridge (`.neo`) that shows what each controller port
-is reporting. Unzip `Neo Geo Controller Test.zip` from [`releases/`](releases/)
+is reporting. Unzip `Neo Geo Controller Test.zip` from [`releases/`](../releases/)
 and load the `.neo` in MiSTer's Neo Geo core or any emulator that takes `.neo`
 files.
 
@@ -10,7 +10,8 @@ files.
   - The `INPUT` row under each pad shows the raw `UDLRABCD` bits.
 - **Bottom:** a spinner detector per port, for either kind of spinner the
   Paddle Edition patches understand:
-  - **JP3 L/R encoder** (Taito F3 style): shows the count, the speed in counts
+  - **JP3 encoder** (Taito F3 style), on LEFT/RIGHT or across the d-pad pairs.
+    The heading shows which wiring was seen (`L/R` or `PAIRS`). Shows the count, the speed in counts
     per second, and SKIP, the samples where both lines changed at once.
   - **7-bit dial** (Pop 'n Bounce style): shows the position (0–127) and the
     summed count.
@@ -22,7 +23,8 @@ Both ports are sampled about 3,900 times a second from the LSPC raster timer
 
 | Signal | Shown as |
 |---|---|
-| LEFT = phase A, RIGHT = phase B; A leading B = clockwise = +1 | JP3 L/R ENCODER `DETECTED` after 12 clean steps (only LEFT/RIGHT changed), as long as clean steps outnumber other changes and skips 4 to 1 |
+| LEFT = phase A, RIGHT = phase B; A leading B = clockwise = +1 | JP3 ENCODER `L/R` `DETECTED` after 12 clean steps (only LEFT/RIGHT changed), as long as clean steps outnumber other changes and skips 4 to 1 |
+| LEFT or RIGHT = phase A, UP or DOWN = phase B (an encoder inside a real pad) | JP3 ENCODER `PAIRS` `DETECTED` after a quick spin: 12 steps the same way, each within 120 samples (about 30 ms), the same rule as the Paddle Edition patches. A thumb on a d-pad can't do that. Shown only when L/R wasn't seen |
 | Bits 0–6 as a position that moves 1–3 at a time | 7-BIT DIAL `DETECTED` after 8 such steps in a row in the same direction, which no pad can produce |
 
 `DETECTED` stays on once seen. `MOVING` shows for half a second after each step.

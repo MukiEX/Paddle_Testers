@@ -6,7 +6,7 @@ signals can toggle many times per frame exactly like a real encoder.
 """
 import ctypes as C, os, struct
 
-# Patched Geolith core (see geolith-harness.patch) and a folder holding neogeo.zip
+# Patched Geolith core (see third_party/geolith-harness.patch) and a folder holding neogeo.zip
 CORE = os.environ.get('GEOLITH_CORE', 'geolith_libretro.so')
 SYSDIR = os.environ.get('NEOGEO_SYSDIR', 'sys')
 MCYC_PER_FRAME = 405504
@@ -46,6 +46,7 @@ class Spinner:
         self.t0 = 0
         self.quantum = 0
         self.invert = False
+        self.wiring = 'lr'      # 'lr': A=LEFT B=RIGHT; 'pairs': A=LEFT B=UP (encoder inside a pad)
 
     def phase(self, t_mcyc):
         # 24 MHz master clock
@@ -158,7 +159,12 @@ class Neo:
     def state(self, port, device, index, idn):
         if device != 1 or port > 1:
             return 0
-        if idn in (LEFT, RIGHT) and self.spin_on[port]:
+        if self.spin_on[port] and self.spin[port].wiring == 'pairs' and idn in (LEFT, UP):
+            if idn == LEFT:
+                self.reads[port] += 1
+            a, b = self.spin[port].phase(self.now())
+            return a if idn == LEFT else b
+        if idn in (LEFT, RIGHT) and self.spin_on[port] and self.spin[port].wiring == 'lr':
             if idn == LEFT:
                 self.reads[port] += 1
             a, b = self.spin[port].phase(self.now())
@@ -182,8 +188,9 @@ class Neo:
     def tap(self, port, btn, hold=3, after=3):
         self.press(port, btn); self.run(hold); self.release(port, btn); self.run(after)
 
-    def spinner(self, port, on=True, quantum_us=0, invert=False):
+    def spinner(self, port, on=True, quantum_us=0, invert=False, wiring='lr'):
         self.spin_on[port] = on
+        self.spin[port].wiring = wiring
         self.spin[port].quantum = quantum_us
         self.spin[port].invert = invert
 
