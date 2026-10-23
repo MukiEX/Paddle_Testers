@@ -25,6 +25,8 @@ mainloop:
         nop
         bsr     read_pads               ! result of last frame's INTBACK (ready at ~line 207)
         nop
+        bsr     spin_all                ! JP3 detection, same rules as the Saturn Paddle Edition
+        nop
         bsr     apply_palette
         nop
         bsr     issue_intback           ! completes just before the next vblank (OPE)
@@ -282,9 +284,201 @@ R_timeout: .long 400000
 R_buf:   ABS oreg_buf
 R_ports: ABS ports
 
+! ------------------------------------------------------------------ spinner detection
+! Same rules as the Saturn Paddle Edition patch. spin[p] (16 bytes):
+!  +0 latch (0 none, 1 LEFT/RIGHT, 2 Y/Z, 3 across the d-pad pairs)  +1 phase  +2 last dir
+!  +3 flip window  +4 previous A/B state (cross wiring)  +5 last ID  +6 seen countdown
+!  +7 edges this frame  +8 edge total (word)  +10 pad dropped out (shown in the bit stream)
+spin_all:
+        mov.l   SP_ports, r8
+        mov.l   SP_spin, r9
+        mov     #2, r11
+sp_port:
+        mov.b   @r8, r0
+        extu.b  r0, r10                 ! id
+        ! drop tracking: a port that had a device and now reports none
+        mov.w   SP_ff, r1
+        cmp/eq  r1, r10
+        bf      1f
+        mov.b   @(6, r9), r0
+        tst     r0, r0
+        bt      2f
+        add     #-1, r0
+        mov.b   r0, @(6, r9)
+        mov     #1, r0
+        bra     3f
+        mov.b   r0, @(10, r9)
+1:      mov     #60, r0
+        mov.b   r0, @(6, r9)
+2:      mov     #0, r0
+        mov.b   r0, @(10, r9)
+3:      ! a new ID (including none) starts over, as in the patch
+        mov.b   @(5, r9), r0
+        extu.b  r0, r0
+        cmp/eq  r0, r10
+        bt      4f
+        mov     r10, r0
+        mov.b   r0, @(5, r9)
+        mov     #0, r0
+        mov.b   r0, @r9
+        mov.b   r0, @(1, r9)
+        mov.b   r0, @(2, r9)
+        mov.b   r0, @(3, r9)
+        mov.b   r0, @(4, r9)
+        mov.w   r0, @(8, r9)
+4:      mov     #0, r7                  ! edges this frame
+        mov.w   @(12, r8), r0
+        extu.w  r0, r4                  ! buttons, active high (0 for non-pad devices)
+        mov     r4, r5
+        shlr8   r5
+        shlr2   r5
+        shlr2   r5
+        shlr2   r5                      ! r5 = LEFT (bit0) | RIGHT (bit1)
+        mov     r4, r0
+        shlr2   r0
+        shlr2   r0                      ! bit1 Y, bit0 Z
+        and     #3, r0
+        mov     r0, r6
+        shlr    r6                      ! Y -> bit0
+        and     #1, r0
+        shll    r0
+        or      r0, r6                  ! r6 = Y (bit0) | Z (bit1)
+        ! cross state: A = LEFT|RIGHT, B = UP|DOWN
+        mov     r4, r0
+        shlr8   r0
+        shlr2   r0
+        shlr2   r0                      ! bits 0 UP, 1 DOWN, 2 LEFT, 3 RIGHT
+        mov     #0, r3
+        tst     #12, r0
+        bt      5f
+        mov     #1, r3
+5:      tst     #3, r0
+        bt      6f
+        add     #2, r3                  ! r3 = cross A/B state
+6:      mov.b   @r9, r0
+        tst     r0, r0
+        bf      sp_decode
+        ! ---- not latched yet
+        mov     r5, r0
+        cmp/eq  #3, r0
+        bf      7f
+        mov     #1, r0
+        bra     sp_latch2
+        nop
+7:      mov     r6, r0
+        cmp/eq  #3, r0
+        bf      8f
+        mov     #2, r0
+sp_latch2:
+        mov.b   r0, @r9
+        mov     #2, r0                  ! phase of A=1,B=1
+        bra     sp_done
+        mov.b   r0, @(1, r9)
+8:      ! two frame-perfect A-only <-> B-only flips within 60 reads
+        mov.b   @(4, r9), r0
+        and     #3, r0
+        mov     r0, r1                  ! previous
+        mov     r3, r0
+        mov.b   r0, @(4, r9)
+        xor     r1, r0
+        cmp/eq  #3, r0
+        bf      9f
+        mov     r3, r0
+        cmp/eq  #1, r0
+        bt      10f
+        cmp/eq  #2, r0
+        bf      9f
+10:     mov.b   @(3, r9), r0
+        tst     r0, r0
+        bt      11f
+        mov     #3, r0
+        mov.b   r0, @r9
+        mov     r3, r0
+        cmp/eq  #1, r0
+        mov     #1, r0
+        bt      12f
+        mov     #3, r0
+12:     mov.b   r0, @(1, r9)
+        mov     #0, r0
+        bra     sp_done
+        mov.b   r0, @(3, r9)
+11:     mov     #60, r0
+        bra     sp_done
+        mov.b   r0, @(3, r9)
+9:      mov.b   @(3, r9), r0
+        tst     r0, r0
+        bt      sp_done
+        add     #-1, r0
+        bra     sp_done
+        mov.b   r0, @(3, r9)
+        ! ---- latched: decode the wiring it latched on
+sp_decode:
+        cmp/eq  #1, r0
+        bf      13f
+        bra     14f
+        mov     r5, r2
+13:     cmp/eq  #2, r0
+        bf      15f
+        bra     14f
+        mov     r6, r2
+15:     mov     r3, r2
+14:     mov     r2, r0                  ! phase = A xor 3B
+        and     #1, r0
+        mov     r0, r1
+        mov     r2, r0
+        shlr    r0
+        and     #1, r0
+        mov     r0, r2
+        add     r0, r2
+        add     r0, r2
+        xor     r2, r1                  ! r1 = phase
+        mov.b   @(1, r9), r0
+        extu.b  r0, r2
+        mov     r1, r0
+        mov.b   r0, @(1, r9)
+        sub     r2, r0
+        and     #3, r0
+        cmp/eq  #1, r0
+        bf      16f
+        mov     #1, r7
+        mov     #1, r0
+        bra     sp_done
+        mov.b   r0, @(2, r9)
+16:     cmp/eq  #3, r0
+        bf      17f
+        mov     #-1, r7
+        mov     #-1, r0
+        bra     sp_done
+        mov.b   r0, @(2, r9)
+17:     cmp/eq  #2, r0                  ! two edges: in the last direction
+        bf      sp_done
+        mov.b   @(2, r9), r0
+        mov     r0, r7
+        add     r7, r7
+sp_done:
+        mov     r7, r0
+        mov.b   r0, @(7, r9)
+        mov.w   @(8, r9), r0
+        add     r7, r0
+        mov.w   r0, @(8, r9)
+        add     #16, r8
+        add     #16, r9
+        dt      r11
+        bt      1f
+        bra     sp_port
+        nop
+1:      rts
+        nop
+        .align 2
+SP_ff:    .word 0xFF
+          .word 0
+SP_ports: ABS ports
+SP_spin:  ABS spin
+
 ! ------------------------------------------------------------------ palette
 ! For each port and each of the 13 buttons write fill + label colours.
 apply_palette:
+        sts.l   pr, @-r15
         mov.l   P_ports, r8
         mov.l   P_fill, r2              ! CRAM + 32*2
         mov.l   P_lab, r3               ! CRAM + 64*2
@@ -313,12 +507,74 @@ apply_palette:
         add     #16, r8
         dt      r9
         bf      1b
+        ! ---- knob layer: per port, d-pad face and the dual-colour pixels
+        mov.l   P_spin, r8
+        mov.l   P_duals, r10
+        mov.l   P_fill, r2
+        mov.l   P_lab, r3
+        mov     #2, r9
+3:      mov.b   @r8, r0                 ! latch
+        tst     r0, r0
+        movt    r11                     ! r11 = 1: normal pad, 0: spinner
+        mov.w   @(8, r8), r0            ! edges
+        and     #15, r0
+        mov     r0, r12                 ! marker segment
+        mov.l   P_knob, r1
+        mov.w   @r1, r6                 ! face colour
+        mov.w   @(2, r1), r0
+        mov     r0, r7                  ! marker colour
+        tst     r11, r11
+        bf      4f
+        ! spinner: the four d-pad fills and arrows take the face colour
+        mov     r6, r0
+        mov.w   r0, @r2
+        mov.w   r0, @(2, r2)
+        mov.w   r0, @(4, r2)
+        mov.w   r0, @(6, r2)
+        mov.w   r0, @r3
+        mov.w   r0, @(2, r3)
+        mov.w   r0, @(4, r3)
+        mov.w   r0, @(6, r3)
+4:      mov.w   @r10+, r0
+        extu.w  r0, r5                  ! entries
+        tst     r5, r5
+        bt      7f
+5:      mov.w   @r10+, r0
+        extu.w  r0, r13                 ! colour RAM index
+        mov.w   @r10+, r0
+        mov     r0, r1                  ! normal colour
+        mov.w   @r10+, r0
+        mov     r0, r4                  ! knob colour
+        mov.w   @r10+, r0
+        extu.w  r0, r0                  ! rim segment (0xFFFF = none)
+        tst     r11, r11
+        bf      6f
+        mov     r4, r1
+        cmp/eq  r12, r0
+        bf      6f
+        mov     r7, r1                  ! the marker
+6:      mov.l   P_cram, r0
+        shll    r13
+        add     r13, r0
+        mov.w   r1, @r0
+        dt      r5
+        bf      5b
+7:      add     #16, r8
+        add     #32, r2
+        add     #32, r3
+        dt      r9
+        bf      3b
+        lds.l   @r15+, pr
         rts
         nop
         .align 2
 P_ports: ABS ports
 P_fill:  .long CRAM + 32*2
 P_lab:   .long CRAM + 64*2
+P_spin:  ABS spin
+P_duals: ABS duals
+P_knob:  ABS knobcol
+P_cram:  .long CRAM
 P_cols:  ABS btncol
 
 ! ------------------------------------------------------------------ traces
@@ -334,92 +590,138 @@ draw_trace:
         mov     #0, r0
 1:      mov.w   r0, @r12
         mov     r0, r11                 ! next position (cursor)
-        ! column address
         mov.l   T_col0, r13
-        add     r10, r13
+        add     r10, r13                ! column address
         mov.l   T_ports, r8
         mov.l   T_pats, r9
         mov     #2, r14                 ! ports
 tport:
         mov.w   @(12, r8), r0
-        extu.w  r0, r4
-        ! pair masks
-        mov     r4, r0
+        extu.w  r0, r4                  ! buttons
+        ! r6 bits: 0 LEFT+RIGHT, 1 UP+DOWN, 2 Y+Z (both of a pair held)
+        mov     #0, r6
         mov.w   T_lr, r1
         extu.w  r1, r1
-        and     r1, r0
-        cmp/eq  r1, r0
-        movt    r6                      ! r6 = both LEFT+RIGHT
         mov     r4, r0
-        mov     #0x30, r1
         and     r1, r0
         cmp/eq  r1, r0
-        movt    r7                      ! r7 = both Y+Z
-        ! counters: state +4 (p0 lr) +6 (p0 yz) +8 (p1 lr) +10 (p1 yz)
-        mov     #2, r0
-        sub     r14, r0                 ! port index 0/1
-        shll2   r0
-        add     r12, r0
-        mov     r0, r5                  ! &counter pair - 4
-        ! A+B+C+START clears this port's counters
-        mov.w   T_rst, r1
+        bf      2f
+        add     #1, r6
+2:      mov.w   T_ud, r1
         mov     r4, r0
         and     r1, r0
         cmp/eq  r1, r0
         bf      3f
+        add     #2, r6
+3:      mov     #0x30, r1
+        mov     r4, r0
+        and     r1, r0
+        cmp/eq  r1, r0
+        bf      4f
+        add     #4, r6
+4:      ! port index -> counters (state + 4 + p*8) and spin[p]
+        mov     #2, r0
+        sub     r14, r0
+        mov     r0, r2
+        shll2   r0
+        shll    r0
+        add     r12, r0
+        mov     r0, r5                  ! counters - 4
+        mov.l   T_spin, r7
+        shll2   r2
+        shll2   r2
+        add     r2, r7
+        mov.b   @(10, r7), r0           ! dropped out this frame?
+        mov     r0, r10
+        ! A+B+C+START clears this port's counters and edge total
+        mov.w   T_rst, r1
+        mov     r4, r0
+        and     r1, r0
+        cmp/eq  r1, r0
+        bf      5f
         mov     #0, r0
         mov.w   r0, @(4, r5)
         mov.w   r0, @(6, r5)
-3:      tst     r6, r6
-        bt      4f
+        mov.w   r0, @(8, r5)
+        mov.w   r0, @(8, r7)
+5:      mov     r6, r0
+        tst     #1, r0
+        bt      6f
         mov.w   @(4, r5), r0
         add     #1, r0
         mov.w   r0, @(4, r5)
-4:      tst     r7, r7
-        bt      5f
+6:      mov     r6, r0
+        tst     #2, r0
+        bt      7f
         mov.w   @(6, r5), r0
         add     #1, r0
         mov.w   r0, @(6, r5)
-5:      ! four traces: LEFT bit14 RIGHT bit15 Y bit5 Z bit4
+7:      mov     r6, r0
+        tst     #4, r0
+        bt      8f
+        mov.w   @(8, r5), r0
+        add     #1, r0
+        mov.w   r0, @(8, r5)
+8:      ! six rows: LEFT RIGHT UP DOWN Y Z
         mov.w   T_left, r1
-        bsr     trace_one
         mov     r6, r3
+        bsr     trace_one
+        nop
         mov.w   T_right, r1
-        bsr     trace_one
+        extu.w  r1, r1
         mov     r6, r3
+        bsr     trace_one
+        nop
+        mov.w   T_up, r1
+        mov     r6, r3
+        bsr     trace_one
+        shlr    r3
+        mov.w   T_down, r1
+        mov     r6, r3
+        bsr     trace_one
+        shlr    r3
         mov     #0x20, r1
+        mov     r6, r3
         bsr     trace_one
-        mov     r7, r3
+        shlr2   r3
         mov     #0x10, r1
+        mov     r6, r3
         bsr     trace_one
-        mov     r7, r3
+        shlr2   r3
         add     #16, r8
         dt      r14
         bf      tport
         ! cursor column at next position
         mov.l   T_col0, r13
         add     r11, r13
-        mov     #96, r3
+        mov.w   T_rows, r3
         mov     #CURSOR, r0
         mov.w   T_512, r1
-6:      mov.b   r0, @r13
+9:      mov.b   r0, @r13
         dt      r3
-        bf/s    6b
+        bf/s    9b
         add     r1, r13
         lds.l   @r15+, pr
         rts
         nop
-! r4 buttons, r1 bit mask, r3 pair-both flag, r9 pattern ptr (advanced 36), r13 column (advanced 12 rows)
+! r4 buttons, r1 bit mask, r3 bit0 = both of its pair held, r10 = pad dropped out,
+! r9 pattern ptr (advanced 32), r13 column (advanced ROWH rows)
 trace_one:
-        mov     #0, r2
-        tst     r1, r4
-        bt      1f
-        mov     #12, r2
-        tst     r3, r3
+        tst     r10, r10
         bt      1f
         mov     #24, r2
-1:      add     r9, r2
-        mov     #12, r3
+        bra     3f
+        nop
+1:      mov     #0, r2
+        tst     r1, r4
+        bt      3f
+        mov     #8, r2
+        mov     r3, r0
+        tst     #1, r0
+        bt      3f
+        mov     #16, r2
+3:      add     r9, r2
+        mov     #ROWH, r3
         mov.w   T_512, r1
 2:      mov.b   @r2+, r0
         mov.b   r0, @r13
@@ -427,17 +729,22 @@ trace_one:
         bf/s    2b
         add     r1, r13
         rts
-        add     #36, r9
+        add     #32, r9
         .align 2
 T_tw:    .word TW
 T_512:   .word 512
 T_rst:   .word 0x0F00
 T_lr:    .word 0xC000
+T_ud:    .word 0x3000
 T_left:  .word 0x4000
 T_right: .word 0x8000
+T_up:    .word 0x1000
+T_down:  .word 0x2000
+T_rows:  .word NROWS
 T_state: ABS state
 T_col0:  .long VRAM + TY0*512 + TX0
 T_ports: ABS ports
+T_spin:  ABS spin
 T_pats:  ABS pats
 
 ! ------------------------------------------------------------------ text
@@ -507,6 +814,7 @@ put_hex:
 put_dec:
         mov.l   H_pow, r2
         mov     #5, r5
+put_decn:
 1:      mov.l   @r2+, r3
         mov     #48, r6
 2:      cmp/hs  r3, r0
@@ -520,9 +828,42 @@ put_dec:
         add     #1, r1
         rts
         nop
+! copy ASCIIZ @r2 to @r1+ (uses r0, r2)
+put_str:
+        mov.b   @r2+, r0
+        tst     r0, r0
+        bt      1f
+        mov.b   r0, @r1
+        bra     put_str
+        add     #1, r1
+1:      rts
+        nop
+! r0 signed -> writes '+' or '-' at @r1+, leaves |r0| in r0 (uses r2)
+put_sign:
+        exts.w  r0, r0
+        mov     #43, r2
+        cmp/pz  r0
+        bt      1f
+        neg     r0, r0
+        mov     #45, r2
+1:      mov.b   r2, @r1
+        rts
+        add     #1, r1
+! decimal 0..9999 r0 -> 4 chars at @r1+ (uses r2, r3, r5, r6)
+put_dec4:
+        mov.w   H_9999, r2
+        cmp/hi  r2, r0
+        bf      1f
+        mov     r2, r0
+1:      mov.l   H_pow, r2
+        add     #4, r2
+        bra     put_decn
+        mov     #4, r5
         .align 2
 H_digits: ABS hexdigits
 H_pow:    ABS pow10
+H_9999:   .word 9999
+          .word 0
 
 draw_text:
         sts.l   pr, @-r15
@@ -550,7 +891,25 @@ tloop:
         bt      2f
         bra     1b
         add     #20, r2
-2:      add     #1, r2
+2:      mov.l   D_spin, r0              ! latched JP3 spinner: name the wiring instead
+        mov     r9, r3
+        shll2   r3
+        shll2   r3
+        add     r3, r0
+        mov.b   @r0, r0
+        tst     r0, r0
+        bt      21f
+        mov.l   D_snames, r2
+        add     #-1, r0
+        mov     r0, r3
+        shll2   r0
+        shll2   r0
+        add     r3, r0
+        add     r3, r0
+        add     r3, r0
+        add     r3, r0                  ! (latch - 1) * 20
+        add     r0, r2
+21:     add     #1, r2
         mov     #18, r3
 3:      mov.b   @r2+, r0
         mov.b   r0, @r1
@@ -603,40 +962,69 @@ tloop:
         mov     #89, r6
         bsr     draw_str
         nop
-        ! ---------- both-held counters "LR 00000  YZ 00000"
+        ! ---------- "BOTH LR0000 UD0000 YZ0000", or "SPIN +00012  STEP +1" once latched
         mov.l   D_buf, r1
-        mov     #76, r0
-        mov.b   r0, @r1
-        mov     #82, r0
-        mov.b   r0, @(1, r1)
-        mov     #32, r0
-        mov.b   r0, @(2, r1)
-        add     #3, r1
+        mov.l   D_spin, r11
         mov     r9, r0
         shll2   r0
+        shll2   r0
+        add     r0, r11                 ! spin[p]
+        mov.b   @r11, r0
+        tst     r0, r0
+        bf      30f
+        mov.l   D_sboth, r2
+        bsr     put_str
+        nop
+        mov     r9, r0
+        shll2   r0
+        shll    r0
         add     r12, r0
-        mov     r0, r11
+        mov     r0, r11                 ! counters - 4
         mov.w   @(4, r11), r0
-        bsr     put_dec
+        bsr     put_dec4
         extu.w  r0, r0
-        mov     #32, r0
-        mov.b   r0, @r1
-        mov.b   r0, @(1, r1)
-        mov     #89, r0
-        mov.b   r0, @(2, r1)
-        mov     #90, r0
-        mov.b   r0, @(3, r1)
-        mov     #32, r0
-        mov.b   r0, @(4, r1)
-        add     #5, r1
+        mov.l   D_sud, r2
+        bsr     put_str
+        nop
         mov.w   @(6, r11), r0
-        bsr     put_dec
+        bsr     put_dec4
         extu.w  r0, r0
-        mov     #0, r0
+        mov.l   D_syz, r2
+        bsr     put_str
+        nop
+        mov.w   @(8, r11), r0
+        bsr     put_dec4
+        extu.w  r0, r0
+        bra     31f
+        nop
+30:     mov.l   D_sspin, r2
+        bsr     put_str
+        nop
+        mov.w   @(8, r11), r0           ! edge total, signed
+        bsr     put_sign
+        nop
+        bsr     put_dec
+        nop
+        mov.l   D_sstep, r2
+        bsr     put_str
+        nop
+        mov.b   @(7, r11), r0           ! edges this frame, -2..2
+        bsr     put_sign
+        nop
+        add     #48, r0
+        mov.b   r0, @r1
+        add     #1, r1
+        mov.l   D_spad, r2
+        bsr     put_str
+        nop
+31:     mov     #0, r0
         mov.b   r0, @r1
         mov.l   D_buf, r4
-        mov     r13, r5
-        add     #12, r5
+        mov     r9, r5
+        mov.w   D_160, r0
+        mulu.w  r0, r5
+        sts     macl, r5
+        add     #4, r5
         mov     #101, r6
         bsr     draw_str
         nop
@@ -644,7 +1032,10 @@ tloop:
         add     #1, r9
         mov     r9, r0
         cmp/eq  #2, r0
-        bf      tloop
+        bt      1f
+        bra     tloop
+        nop
+1:
         lds.l   @r15+, pr
         rts
         nop
@@ -655,6 +1046,14 @@ D_ports: ABS ports
 D_state: ABS state
 D_buf:   ABS strbuf
 D_names: ABS names
+D_spin:  ABS spin
+D_snames: ABS spinnames
+D_sboth: ABS s_both
+D_sud:   ABS s_ud
+D_syz:   ABS s_yz
+D_sspin: ABS s_spin
+D_sstep: ABS s_step
+D_spad:  ABS s_pad
 
 ! ------------------------------------------------------------------ data
         .align 2
@@ -747,8 +1146,27 @@ names:
         .byte 0x00
         .ascii "OTHER DEVICE      "
         .byte 0
+spinnames:
+        .byte 0
+        .ascii "JP3 SPINNER L/R   "
+        .byte 0
+        .byte 0
+        .ascii "JP3 SPINNER Y/Z   "
+        .byte 0
+        .byte 0
+        .ascii "JP3 SPINNER D-PAD "
+        .byte 0
+s_both: .asciz "BOTH LR"
+s_ud:   .asciz " UD"
+s_yz:   .asciz " YZ"
+s_spin: .asciz "SPIN "
+s_step: .asciz "  STEP "
+s_pad:  .asciz "     "
         .align 2
 btncol: .incbin "build/btncol.bin"
+duals:  .incbin "build/duals.bin"
+        .align 2
+knobcol: .incbin "build/knobcol.bin"
 pats:   .incbin "build/pats.bin"
         .align 4
 font:   .incbin "build/font.bin"
@@ -756,6 +1174,7 @@ pal:    .incbin "build/pal.bin"
         .align 4
 state:  .space 256              ! +0 sweep pos, +4.. counters
 ports:  .space 32
+spin:   .space 32
 oreg_buf: .space 32
 strbuf: .space 64
         .align 4
